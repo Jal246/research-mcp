@@ -15,25 +15,38 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from mcp.server.mcpserver import MCPServer
+import platformdirs
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from research_mcp import crawl, fetch, papers, report, search, similar, structured
-from research_mcp.cache import PageCache, SearchCache
+from research_mcp.cache import PageCache, ResponseCache, SearchCache
 from research_mcp.embed import Embedder
 from research_mcp.extract import ExtractError, Page, extract
 from research_mcp.library import Document, Library, LibraryError
 from research_mcp.papers import Paper
 from research_mcp.search import Result
 
-# Fetched pages are saved here for a while, and the embedding model is downloaded here. Override
-# with the RESEARCH_CACHE_DIR environment variable. Everything in it can be rebuilt, so it's safe
-# to delete.
-DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache"
+def default_dirs(code: Path) -> tuple[Path, Path]:
+    """The (cache, data) folders for the server whose code is at `code` (this file).
+
+    Run from a clone of the repo (uv run), everything stays in the repo folder. Installed (uvx,
+    pip), the code lives somewhere uv or pip may wipe on an update, so files go in the system's
+    usual folders for app data instead (on Windows, AppData\\Local\\research-mcp).
+    """
+    repo = code.resolve().parents[2]  # src/research_mcp/server.py -> the repo.
+    if (repo / "pyproject.toml").exists():
+        return repo / ".cache", repo / "data"
+    return (Path(platformdirs.user_cache_dir("research-mcp", appauthor=False)),
+            Path(platformdirs.user_data_dir("research-mcp", appauthor=False)))
+
+
+# Fetched pages are saved in the cache folder for a while, and the embedding model is downloaded
+# there. Everything in it can be rebuilt, so it's safe to delete. The data folder holds the
+# research library: the user's own work, which can't be rebuilt. Override them with the
+# RESEARCH_CACHE_DIR and RESEARCH_DATA_DIR environment variables.
+DEFAULT_CACHE_DIR, DEFAULT_DATA_DIR = default_dirs(Path(__file__))
 CACHE_DIR = Path(os.environ.get("RESEARCH_CACHE_DIR", DEFAULT_CACHE_DIR)).resolve()
-# The research library. Unlike .cache, this is the user's own work and can't be rebuilt, so it
-# gets its own folder. Override with RESEARCH_DATA_DIR.
-DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 DATA_DIR = Path(os.environ.get("RESEARCH_DATA_DIR", DEFAULT_DATA_DIR)).resolve()
 # A cached page is used for this long before it's fetched again; search results for an hour.
 CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -103,6 +116,10 @@ def _cache() -> PageCache:
 
 def _search_cache() -> SearchCache:
     return SearchCache(CACHE_DIR / "searches.db", SEARCH_CACHE_MAX_AGE_SECONDS)
+
+
+def _response_cache() -> ResponseCache:
+    return ResponseCache(CACHE_DIR / "responses.db", CACHE_MAX_AGE_SECONDS)
 
 
 @lru_cache(maxsize=1)
@@ -482,8 +499,8 @@ def _preview(page: Page) -> str:
 
 @mcp.tool()
 async def crawl_site(
-    url: str, max_pages: int = DEFAULT_CRAWL_PAGES, max_depth: int = 2, save: bool = False,
-    tags: list[str] | None = None,
+    ctx: Context, url: str, max_pages: int = DEFAULT_CRAWL_PAGES, max_depth: int = 2,
+    save: bool = False, tags: list[str] | None = None,
 ) -> str:
     """Read several pages of one website, like a docs site, blog or course: starting at url,
     follow links to other pages under the same folder (starting at example.org/docs/ reads
@@ -505,7 +522,7 @@ async def crawl_site(
         raise ToolError(f"max_depth must be between 0 and {MAX_DEPTH}")
     start = _normalize(url)
     try:
-        found = await crawl.crawl(start, max_pages, max_depth)
+        found = await crawl.crawl(start, max_pages, max_depth, ctx.report_progress)
     except crawl.CrawlError as error:
         raise ToolError(str(error)) from error
     if not found.pages:
@@ -541,11 +558,12 @@ async def crawl_site(
 
 @mcp.tool()
 async def extract_data(
-    url: str, kinds: list[StructuredKind] | None = None, max_items: int = DEFAULT_MAX_ITEMS
+    url: str, kinds: list[StructuredKind] | None = None, max_items: int = DEFAULT_MAX_ITEMS,
+    refresh: bool = False,
 ) -> str:
     """Get the structured data from a web page as JSON: exact values the page marks up for
     machines, rather than its prose. Good for prices, specs, dates, ratings, ingredients,
-    comparison tables, and a page's outline.
+    comparison tables, and a page's outline. Pages are cached for a day.
 
     Args:
         url: The page, e.g. a product, recipe, event, article or Wikipedia page.
@@ -560,14 +578,19 @@ async def extract_data(
             code: code blocks, with their language.
             links: every link, with its text and whether it stays on the same site.
         max_items: Most items of each kind, and most rows per table (up to 500).
+        refresh: Fetch the page again even if it's cached (for prices and other things that change).
     """
     kinds = list(dict.fromkeys(kinds or DEFAULT_KINDS))
     if not 1 <= max_items <= MAX_MAX_ITEMS:
         raise ToolError(f"max_items must be between 1 and {MAX_MAX_ITEMS}")
-    try:
-        response = await fetch.fetch(_normalize(url))
-    except fetch.FetchError as error:
-        raise ToolError(str(error)) from error
+    requested = _normalize(url)
+    cache = _response_cache()
+    if refresh or not (response := cache.get(requested)):
+        try:
+            response = await fetch.fetch(requested)
+        except fetch.FetchError as error:
+            raise ToolError(str(error)) from error
+        cache.put(requested, response)
     mime = response.content_type.split(";")[0].strip().lower()
     if mime not in ("text/html", "application/xhtml+xml", ""):
         raise ToolError(f"{response.url} is {mime}, not a web page; extract_data reads HTML "
@@ -581,8 +604,8 @@ async def extract_data(
 
 @mcp.tool()
 async def research_report(
-    question: str, max_sources: int = DEFAULT_REPORT_SOURCES, include_papers: bool = True,
-    save: bool = False, tags: list[str] | None = None,
+    ctx: Context, question: str, max_sources: int = DEFAULT_REPORT_SOURCES,
+    include_papers: bool = True, save: bool = False, tags: list[str] | None = None,
 ) -> str:
     """Research a question in one step: search the web, research papers and the user's
     library, read the most relevant sources, and return a brief of numbered sources with the
@@ -603,7 +626,8 @@ async def research_report(
         raise ToolError(f"max_sources must be between 1 and {MAX_REPORT_SOURCES}")
     library = _library()
     brief, saved = await report.research(
-        question, max_sources, include_papers, _read_page, library, _search_cache())
+        question, max_sources, include_papers, _read_page, library, _search_cache(),
+        ctx.report_progress)
     failures = [f"- {SOURCE_NAMES.get(name, name)}: {message}" for name, message in brief.failed.items()]
     if not brief.sources and not saved:
         raise ToolError(f'Found nothing to read for "{question}".'

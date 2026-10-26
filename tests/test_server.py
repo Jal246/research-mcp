@@ -1,6 +1,7 @@
 """Tests that talk to the server through a real MCP client, the same way Claude does."""
 
 import json
+from pathlib import Path
 
 import pytest
 from mcp import Client
@@ -432,3 +433,57 @@ async def test_research_report_errors(args, message):
     result = await call("research_report", args)
     assert result.is_error
     assert message in text_of(result)
+
+
+# --- Progress, caching and folders --------------------------------------------------------------
+
+async def call_with_progress(tool: str, args: dict) -> tuple[str, list]:
+    updates = []
+
+    async def on_progress(progress, total, message):
+        updates.append((progress, total, message))
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(tool, args, progress_callback=on_progress)
+    assert not result.is_error, text_of(result)
+    return text_of(result), updates
+
+
+async def test_research_report_reports_progress():
+    _, updates = await call_with_progress("research_report", {"question": "rsa primes", "max_sources": 3})
+    assert updates[0] == (0, 4, "Searching the web, papers and your library")
+    assert updates[1][:2] == (1, 4) and updates[1][2].startswith("Found ")
+    assert [u[0] for u in updates[2:]] == [2, 3, 4] and all(u[2].startswith("Read ") for u in updates[2:])
+
+
+async def test_crawl_site_reports_progress():
+    _, updates = await call_with_progress("crawl_site", {"url": "https://docs.example/docs/", "max_pages": 3})
+    assert updates == [(1, 3, "Read Example Docs"), (2, 3, "Read Introduction"), (3, 3, "Read Installation")]
+
+
+async def test_tools_that_report_progress_dont_show_ctx():
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+    for name in ("research_report", "crawl_site"):
+        assert "ctx" not in tools[name].input_schema["properties"]
+
+
+async def test_extract_data_is_cached(fake_internet):
+    for _ in range(2):
+        await call("extract_data", {"url": "https://blog.example/product"})
+    assert len(fake_internet) == 1
+    await call("extract_data", {"url": "https://blog.example/product", "refresh": True})
+    assert len(fake_internet) == 2
+
+
+def test_default_dirs_in_a_clone(tmp_path):
+    (tmp_path / "pyproject.toml").touch()
+    code = tmp_path / "src" / "research_mcp" / "server.py"
+    assert server.default_dirs(code) == (tmp_path / ".cache", tmp_path / "data")
+
+
+def test_default_dirs_when_installed(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.platformdirs, "user_cache_dir", lambda app, appauthor: f"/cache/{app}")
+    monkeypatch.setattr(server.platformdirs, "user_data_dir", lambda app, appauthor: f"/data/{app}")
+    code = tmp_path / "Lib" / "site-packages" / "research_mcp" / "server.py"
+    assert server.default_dirs(code) == (Path("/cache/research-mcp"), Path("/data/research-mcp"))

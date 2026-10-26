@@ -164,14 +164,24 @@ def best_passages(page: Page, question: str, query_vector: np.ndarray,
 async def research(
     question: str, max_sources: int, include_papers: bool, get_page: Callable[[str], Awaitable[Page]],
     library: Library, cache: SearchCache | None,
+    progress: Callable[[int, int, str], Awaitable[None]] | None = None,
 ) -> tuple[Brief, list]:
     """Research question: search, choose up to max_sources sources, read them, keep their best
     passages. get_page(url) reads a page (raising FetchError or ExtractError if it can't).
+    progress(done, total, message), if given, is told about each step as it finishes: the
+    search, then each source read.
 
     Returns the brief, and the library's hits for the question (pages already saved).
     """
     embedder = library.embedder
     brief = Brief(question)
+    steps = max_sources + 1  # The search, then each source.
+
+    async def report_progress(done: int, message: str) -> None:
+        if progress:
+            await progress(min(done, steps), steps, message)
+
+    await report_progress(0, "Searching the web" + (", papers" if include_papers else "") + " and your library")
     web_sources = ["duckduckgo", "wikipedia"]
     paper_sources = ["arxiv", "semantic_scholar"] if include_papers else []
 
@@ -193,25 +203,29 @@ async def research(
     candidates += [from_paper(p) for p in found_papers]
     skip = {same_page_key(hit.document.url) for hit in saved}
     ranked = await asyncio.to_thread(rank, candidates, query_vector, embedder, skip)
+    await report_progress(1, f"Found {len(ranked)} results; reading the best")
 
     per_site: Counter = Counter()
     refused: set[str] = set()
+
+    async def read(candidate: Candidate) -> None:
+        try:
+            page = await get_page(candidate.url)
+        except (fetch.FetchError, ExtractError) as error:
+            brief.failed[candidate.url] = str(error)
+            per_site[site(candidate.url)] -= 1  # Another page from the site may work...
+            if isinstance(error, fetch.FetchError) and error.status_code in REFUSED:
+                refused.add(site(candidate.url))  # ...unless it refuses bots.
+            return
+        passages = await asyncio.to_thread(best_passages, page, question, query_vector, embedder)
+        brief.sources.append(Source(candidate, page, passages))
+        await report_progress(1 + len(brief.sources), f"Read {page.title or candidate.title}")
+
     for _ in range(ROUNDS):
         chosen = take(ranked, max_sources - len(brief.sources), per_site, refused)
         if not chosen:
             break
-        pages = await asyncio.gather(*(get_page(c.url) for c in chosen), return_exceptions=True)
-        for candidate, page in zip(chosen, pages):
-            if isinstance(page, (fetch.FetchError, ExtractError)):
-                brief.failed[candidate.url] = str(page)
-                per_site[site(candidate.url)] -= 1  # Another page from the site may work...
-                if isinstance(page, fetch.FetchError) and page.status_code in REFUSED:
-                    refused.add(site(candidate.url))  # ...unless it refuses bots.
-            elif isinstance(page, BaseException):
-                raise page
-            else:
-                passages = await asyncio.to_thread(best_passages, page, question, query_vector, embedder)
-                brief.sources.append(Source(candidate, page, passages))
+        await asyncio.gather(*(read(candidate) for candidate in chosen))
     # Best sources first: by their best passage.
     brief.sources.sort(key=lambda s: s.passages[0].score if s.passages else -1, reverse=True)
     return brief, saved

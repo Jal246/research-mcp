@@ -13,6 +13,7 @@ This module knows nothing about MCP, so it can be used and tested as plain Pytho
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
@@ -96,9 +97,11 @@ async def robots(url: str) -> RobotFileParser:
     return rules
 
 
-async def crawl(start: str, max_pages: int, max_depth: int) -> Crawl:
+async def crawl(start: str, max_pages: int, max_depth: int,
+                progress: Callable[[int, int, str], Awaitable[None]] | None = None) -> Crawl:
     """Read up to max_pages pages, starting at start and following links at most max_depth
-    clicks away (0 reads only the start page)."""
+    clicks away (0 reads only the start page). progress(done, total, message), if given, is
+    told about each page read."""
     rules = await robots(start)
     if not rules.can_fetch(ROBOT_NAME, start):
         raise CrawlError(f"The site's robots.txt asks bots not to read {start}")
@@ -128,6 +131,8 @@ async def crawl(start: str, max_pages: int, max_depth: int) -> Crawl:
             if not result.pages and url == start:
                 scope = page.url
             result.pages.append((url, page))
+            if progress:
+                await progress(len(result.pages), max_pages, f"Read {page.title or page.url}")
             if depth == max_depth:
                 continue
             for link in found:

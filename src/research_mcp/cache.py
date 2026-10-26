@@ -1,6 +1,7 @@
 """Remembering pages we've already fetched, so reading a long page in parts (or asking about it
 again) doesn't download and re-extract it every time. And remembering search results for a
-while, because free search APIs only allow a few searches a minute.
+while, because free search APIs only allow a few searches a minute. And remembering pages as
+downloaded, for extract_data, which reads the HTML itself rather than its extracted text.
 
 This module knows nothing about MCP, so it can be used and tested as plain Python.
 """
@@ -13,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from research_mcp.extract import Page
+from research_mcp.fetch import Response
 
 PAGES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS pages (
@@ -34,6 +36,17 @@ CREATE TABLE IF NOT EXISTS searches (
     key         TEXT PRIMARY KEY,       -- Source, query and options, e.g. "arxiv|rsa|5".
     results     TEXT NOT NULL,          -- JSON list of results.
     searched_at REAL NOT NULL           -- Unix time.
+);
+"""
+
+
+RESPONSES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS responses (
+    requested_url TEXT PRIMARY KEY,
+    url           TEXT NOT NULL,        -- Where it ended up, after redirects.
+    content_type  TEXT NOT NULL,
+    body          BLOB NOT NULL,        -- As downloaded (up to fetch.MAX_BYTES).
+    fetched_at    REAL NOT NULL         -- Unix time.
 );
 """
 
@@ -87,6 +100,31 @@ class PageCache(_SQLiteCache):
                 "INSERT OR REPLACE INTO pages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (requested_url, page.url, page.kind, page.text, page.title, page.site, page.author,
                  page.date, now),
+            )
+
+
+class ResponseCache(_SQLiteCache):
+    """Downloaded files as they came, by the URL that was asked for. Bodies can be megabytes,
+    so expired ones are deleted whenever a new one is saved, rather than kept forever."""
+
+    SCHEMA = RESPONSES_SCHEMA
+
+    def get(self, requested_url: str, now: float | None = None) -> Response | None:
+        now = time.time() if now is None else now
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT url, content_type, body FROM responses WHERE requested_url = ? AND fetched_at > ?",
+                (requested_url, now - self.max_age_seconds),
+            ).fetchone()
+        return None if row is None else Response(row["url"], row["content_type"], bytes(row["body"]))
+
+    def put(self, requested_url: str, response: Response, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        with self._db() as conn:
+            conn.execute("DELETE FROM responses WHERE fetched_at <= ?", (now - self.max_age_seconds,))
+            conn.execute(
+                "INSERT OR REPLACE INTO responses VALUES (?, ?, ?, ?, ?)",
+                (requested_url, response.url, response.content_type, response.body, now),
             )
 
 

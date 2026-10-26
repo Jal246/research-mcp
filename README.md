@@ -46,19 +46,26 @@ No API keys, no paid search service. Everything runs on your computer, including
 
 ## Setup
 
-Needs [uv](https://docs.astral.sh/uv/) and Python 3.13+.
+Needs [uv](https://docs.astral.sh/uv/) (it installs Python 3.13 itself if you don't have it). One command registers the server with Claude Code, straight from GitHub:
+
+```sh
+claude mcp add research -- uvx --from git+https://github.com/Jal246/research-mcp research-mcp
+```
+
+That's it: uv downloads and installs it the first time Claude Code starts the server. Your library and cache go in your system's app-data folder (`AppData\Local\research-mcp` on Windows, `~/Library/Application Support/research-mcp` on macOS, `~/.local/share/research-mcp` and `~/.cache/research-mcp` on Linux), so updating never touches them. To update to the latest version, run `uv cache clean research-mcp` and restart Claude Code.
+
+<details>
+<summary>Or run it from a clone (to change the code)</summary>
 
 ```sh
 git clone https://github.com/Jal246/research-mcp.git
 cd research-mcp
 uv sync
-```
-
-Register the server with Claude Code, using the full path to the repo:
-
-```sh
 claude mcp add research -- uv run --directory /path/to/research-mcp research-mcp
 ```
+
+Run from a clone, the library and cache stay in the repo folder (`data/` and `.cache/`, both gitignored).
+</details>
 
 Then ask Claude things like:
 
@@ -81,8 +88,10 @@ All optional, set as environment variables:
 
 | Variable | Default | What it is |
 |---|---|---|
-| `RESEARCH_CACHE_DIR` | `.cache/` | Fetched pages, recent searches and the embedding model (safe to delete; rebuilt automatically) |
-| `RESEARCH_DATA_DIR` | `data/` | Your research library (`library.db`). This is your own work: back it up rather than deleting it. |
+| `RESEARCH_CACHE_DIR` | app-data cache folder (`.cache/` in a clone) | Fetched pages, recent searches and the embedding model (safe to delete; rebuilt automatically) |
+| `RESEARCH_DATA_DIR` | app-data folder (`data/` in a clone) | Your research library (`library.db`). This is your own work: back it up rather than deleting it. |
+
+Set them with `-e` when registering, e.g. `claude mcp add research -e SEMANTIC_SCHOLAR_API_KEY=... -- uvx --from git+https://github.com/Jal246/research-mcp research-mcp`.
 | `SEMANTIC_SCHOLAR_API_KEY` | none | Makes `search_papers` reliable: without one, Semantic Scholar is shared by everyone and often busy. [Free to request](https://www.semanticscholar.org/product/api#api-key-form). |
 | `GITHUB_TOKEN` | none | Raises GitHub's search limit from 10 to 30 a minute. Any token works; it needs no permissions. |
 
@@ -136,6 +145,7 @@ Claude ──MCP (stdio)──▶ server.py ─┬─▶ report.py      search �
 - **A research brief, not a written report.** The server has no language model of its own (that would need a paid API or a big download), and Claude is better at writing the answer anyway. So `research_report` does the legwork: it returns the evidence, numbered for citing, and Claude writes. Passages are chosen by meaning, but only after a cheap word-overlap shortlist, because embedding every chunk of six long pages took over 10 seconds on a laptop CPU.
 - **Backups for blocked sources.** Stack Overflow, Medium and others answer bots with 403. When a source can't be read, `research_report` reads the next best candidate instead, and skips the rest of a site that refused once. At most two sources come from one site, so the brief has more than one point of view.
 - **Structured data as it is.** `extract_data` doesn't guess: it returns what the page itself declares (JSON-LD, meta tags, table cells), so a price or a date comes out exactly as the site wrote it. CSS and Wikipedia's footnote markers are stripped from cell text, and Wikipedia's navigation boxes aren't treated as tables.
+- **Progress for the slow tools.** `research_report` and `crawl_site` send MCP progress notifications ("Read Installing Python", 2 of 6), so a client that shows them doesn't look frozen for half a minute.
 - **Tracking parameters ignored.** `?utm_source=...`, `?ref=...` and similar don't make a page count as a different one, so a result isn't read twice, or read again when it's already in the library.
 - **A fake internet in the tests.** The tests use `httpx.MockTransport` and fake DNS, so they're fast, run offline and give the same result every time. They use a fake embedding model too (vectors made by counting words), so the tests don't download anything.
 
@@ -147,8 +157,7 @@ Claude ──MCP (stdio)──▶ server.py ─┬─▶ report.py      search �
 - The embedding model is English only, and its similarity scores are rough: a related page might score 0.65 or 0.85. `search_library` drops results under 0.6, so a weakly related page can be missed.
 - `find_similar` can only find pages the search sources can find, and it only uses DuckDuckGo and Wikipedia by default.
 - `research_report` takes 10-30 seconds: most of it is searching (Semantic Scholar without an API key is often busy and retried) and reading pages. It only searches the start of each page (20,000 characters) for passages.
-- `extract_data` reads a table with a two-row header (common on Wikipedia) as one header row plus a row of sub-headings. It fetches the page each time rather than using the cache.
-- `crawl_site` only follows links in the HTML, so sites that build their menus with JavaScript only crawl as far as their plain links go.
+- `extract_data` reads a table with a two-row header (common on Wikipedia) as one header row plus a row of sub-headings.- `crawl_site` only follows links in the HTML, so sites that build their menus with JavaScript only crawl as far as their plain links go.
 - Pages that build their content with JavaScript (some web apps) have little or no text to extract.
 - Sites behind bot protection (Cloudflare challenges, logins) can't be read.
 - Scanned PDFs (images of text) have no text; there's no OCR.
