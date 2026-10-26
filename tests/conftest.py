@@ -20,6 +20,7 @@ FAKE_DNS = {
     "blog.example": ["93.184.215.14"],
     "papers.example": ["93.184.215.15"],
     "docs.example": ["93.184.215.16"],
+    "arxiv.org": ["151.101.3.42"],
     "intranet.example": ["10.0.0.5"],
     # The real search APIs, answered by fake_api.
     "html.duckduckgo.com": ["52.142.124.215"],
@@ -115,8 +116,11 @@ def fake_site(request: httpx.Request, earlier: list[str]) -> httpx.Response:
             return httpx.Response(200, headers={"content-type": "text/plain"}, text=page)
         return docs_page(*page)
     url = str(request.url)
+    if url.startswith("https://arxiv.org/pdf/"):
+        return httpx.Response(200, headers={"content-type": "application/pdf"},
+                              content=(FIXTURES / "sample.pdf").read_bytes())
     match url:
-        case "https://blog.example/rsa":
+        case "https://blog.example/rsa" | "https://blog.example/rsa?ref=ddg":
             return httpx.Response(
                 200, headers={"content-type": "text/html; charset=utf-8"},
                 content=(FIXTURES / "article.html").read_bytes(),
@@ -132,6 +136,9 @@ def fake_site(request: httpx.Request, earlier: list[str]) -> httpx.Response:
         case "https://blog.example/huge":
             return httpx.Response(200, headers={"content-type": "text/plain"},
                                   content=b"x" * (fetch.MAX_BYTES + 1))
+        case "https://blog.example/product":
+            return httpx.Response(200, headers={"content-type": "text/html"},
+                                  content=(FIXTURES / "product.html").read_bytes())
         case "https://blog.example/cat.png":
             return httpx.Response(200, headers={"content-type": "image/png"}, content=b"\x89PNG...")
         case "https://papers.example/paper.pdf":

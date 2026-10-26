@@ -6,6 +6,7 @@ keep a personal library of pages that can be searched by meaning.
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -17,7 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from research_mcp import crawl, fetch, papers, search, similar
+from research_mcp import crawl, fetch, papers, report, search, similar, structured
 from research_mcp.cache import PageCache, SearchCache
 from research_mcp.embed import Embedder
 from research_mcp.extract import ExtractError, Page, extract
@@ -57,6 +58,17 @@ DEFAULT_CRAWL_PAGES = 10
 MAX_CRAWL_PAGES = 50
 MAX_DEPTH = 5
 
+# research_report reads this many sources by default, and at most MAX_REPORT_SOURCES.
+DEFAULT_REPORT_SOURCES = 6
+MAX_REPORT_SOURCES = 12
+
+# extract_data returns these kinds of data unless asked for others, and at most this many of
+# each (tables: rows per table).
+StructuredKind = Literal["metadata", "json_ld", "tables", "headings", "code", "links"]
+DEFAULT_KINDS = ["metadata", "json_ld", "tables", "headings"]
+DEFAULT_MAX_ITEMS = 30
+MAX_MAX_ITEMS = 500
+
 WebSource = Literal["duckduckgo", "wikipedia", "github", "hackernews"]
 PaperSource = Literal["arxiv", "semantic_scholar"]
 SOURCE_NAMES = {"duckduckgo": "DuckDuckGo", "wikipedia": "Wikipedia", "github": "GitHub",
@@ -75,6 +87,9 @@ mcp = MCPServer(
         "pages come back in parts: if the result says there's more, call fetch_page again with "
         "the start_index it gives, but only if you need the rest. find_similar finds pages like "
         "a given one, and crawl_site reads several pages of one site (like a docs site). "
+        "extract_data gets a page's tables, metadata and schema.org data as JSON. For a "
+        "question that needs several sources, start with research_report: it searches, reads "
+        "the best sources and returns their key passages, numbered for citing. "
         "The user has a research library: save_to_library keeps a page (with a note and tags) "
         "and search_library searches the saved pages by meaning. Check the library before "
         "searching the web for a topic the user has researched before. When answering, cite URLs."
@@ -125,18 +140,24 @@ def _normalize(url: str) -> str:
     return urlunsplit(urlsplit(url)._replace(fragment=""))
 
 
-async def _get_page(url: str, refresh: bool) -> Page:
-    """The page at url, from the cache if we fetched it recently."""
+async def _read_page(url: str, refresh: bool = False) -> Page:
+    """The page at url, from the cache if we fetched it recently. Raises FetchError or
+    ExtractError if it can't be read."""
     cache = _cache()
     if not refresh and (page := cache.get(url)):
         return page
-    try:
-        response = await fetch.fetch(url)
-        page = extract(response.url, response.content_type, response.body)
-    except (fetch.FetchError, ExtractError) as error:
-        raise ToolError(str(error)) from error
+    response = await fetch.fetch(url)
+    page = extract(response.url, response.content_type, response.body)
     cache.put(url, page)
     return page
+
+
+async def _get_page(url: str, refresh: bool) -> Page:
+    """_read_page, with problems turned into messages the AI can see."""
+    try:
+        return await _read_page(url, refresh)
+    except (fetch.FetchError, ExtractError) as error:
+        raise ToolError(str(error)) from error
 
 
 def _cut(text: str, start: int, max_chars: int) -> tuple[str, int]:
@@ -515,4 +536,112 @@ async def crawl_site(
         sections.append(f"Saved all {count} to the library"
                         + (f" with tags {', '.join(tags)}." if tags else "."))
     sections.append("Every page read is cached: fetch_page reads any of them in full right away.")
+    return "\n\n".join(sections)
+
+
+@mcp.tool()
+async def extract_data(
+    url: str, kinds: list[StructuredKind] | None = None, max_items: int = DEFAULT_MAX_ITEMS
+) -> str:
+    """Get the structured data from a web page as JSON: exact values the page marks up for
+    machines, rather than its prose. Good for prices, specs, dates, ratings, ingredients,
+    comparison tables, and a page's outline.
+
+    Args:
+        url: The page, e.g. a product, recipe, event, article or Wikipedia page.
+        kinds: What to get (default: metadata, json_ld, tables, headings).
+            metadata: title, description, language, canonical URL, RSS/Atom feeds, OpenGraph
+                and Twitter card tags (og:image, og:type, article:published_time...).
+            json_ld: schema.org data, often the best source of facts: a Product's price and
+                availability, a Recipe's ingredients, an Event's date and place, an Article's
+                author and dates.
+            tables: each table's caption, column names and rows.
+            headings: the page's outline (h1-h6).
+            code: code blocks, with their language.
+            links: every link, with its text and whether it stays on the same site.
+        max_items: Most items of each kind, and most rows per table (up to 500).
+    """
+    kinds = list(dict.fromkeys(kinds or DEFAULT_KINDS))
+    if not 1 <= max_items <= MAX_MAX_ITEMS:
+        raise ToolError(f"max_items must be between 1 and {MAX_MAX_ITEMS}")
+    try:
+        response = await fetch.fetch(_normalize(url))
+    except fetch.FetchError as error:
+        raise ToolError(str(error)) from error
+    mime = response.content_type.split(";")[0].strip().lower()
+    if mime not in ("text/html", "application/xhtml+xml", ""):
+        raise ToolError(f"{response.url} is {mime}, not a web page; extract_data reads HTML "
+                        "(use fetch_page for PDFs and text)")
+    try:
+        data = structured.extract(response.url, response.body, kinds, max_items)
+    except structured.StructuredError as error:
+        raise ToolError(f"{response.url}: {error}") from error
+    return json.dumps({"url": response.url, **data}, indent=1, ensure_ascii=False)
+
+
+@mcp.tool()
+async def research_report(
+    question: str, max_sources: int = DEFAULT_REPORT_SOURCES, include_papers: bool = True,
+    save: bool = False, tags: list[str] | None = None,
+) -> str:
+    """Research a question in one step: search the web, research papers and the user's
+    library, read the most relevant sources, and return a brief of numbered sources with the
+    passages that best answer the question. Write your answer from the brief, citing sources
+    like [1]. Much cheaper than searching and reading pages one by one; follow up with
+    fetch_page on a source to read more of it. Takes 10-30 seconds.
+
+    Args:
+        question: What to find out, e.g. "how does Raft handle network partitions".
+        max_sources: Most sources to read (up to 12), at most 2 from one website.
+        include_papers: Also search arXiv and Semantic Scholar. Turn off for questions papers
+            won't answer (news, products, how-tos) to save time.
+        save: Save every source read to the research library.
+        tags: Tags for the saved sources (used with save=True).
+    """
+    question = _check_search(question, ["web"], 1)
+    if not 1 <= max_sources <= MAX_REPORT_SOURCES:
+        raise ToolError(f"max_sources must be between 1 and {MAX_REPORT_SOURCES}")
+    library = _library()
+    brief, saved = await report.research(
+        question, max_sources, include_papers, _read_page, library, _search_cache())
+    failures = [f"- {SOURCE_NAMES.get(name, name)}: {message}" for name, message in brief.failed.items()]
+    if not brief.sources and not saved:
+        raise ToolError(f'Found nothing to read for "{question}".'
+                        + ("\nProblems:\n" + "\n".join(failures) if failures else ""))
+
+    searched = ", ".join(SOURCE_NAMES[name] for name in brief.searched) or "nothing"
+    count = len(brief.sources) + len(saved)
+    sections = [
+        f"# Research brief: {question}",
+        f"Searched {searched} and the library; {count} source{'s' * (count != 1)} below, best "
+        "first, each with its most relevant passages. Answer from these passages and cite "
+        "sources by number, like [1]. To read more of a source, call fetch_page with its URL "
+        "(and a passage's start_index to jump to it).",
+    ]
+    number = 0
+    for source in brief.sources:
+        number += 1
+        page, candidate = source.page, source.candidate
+        facts = [page.url, page.kind, page.date and f"published {page.date}", candidate.details]
+        lines = [f"## [{number}] {page.title or candidate.title}", " · ".join(f for f in facts if f)]
+        for passage in source.passages:
+            lines += [f"> {' '.join(passage.text.split())}",
+                      f"(similarity {passage.score:.2f} · start_index={passage.start})"]
+        sections.append("\n".join(lines))
+    for hit in saved:
+        number += 1
+        document = hit.document
+        facts = [document.url, "from your library", document.note and f"note: {document.note}"]
+        sections.append("\n".join([
+            f"## [{number}] {document.title or document.url}", " · ".join(f for f in facts if f),
+            f"> {' '.join(hit.passage.split())}",
+            f"(similarity {hit.score:.2f} · start_index={hit.start})",
+        ]))
+    if failures:
+        sections.append("Couldn't use:\n" + "\n".join(failures))
+    if save and brief.sources:
+        for source in brief.sources:
+            await _library_call(library.save, source.page, "", tags)
+        sections.append(f"Saved the {len(brief.sources)} sources read to the library"
+                        + (f" with tags {', '.join(tags)}." if tags else "."))
     return "\n\n".join(sections)

@@ -17,6 +17,8 @@ def test_plain():
 def test_same_page_key():
     assert same_page_key("http://www.Example.org/primes/") == same_page_key("https://example.org/primes")
     assert same_page_key("https://example.org/a?page=1") != same_page_key("https://example.org/a?page=2")
+    assert same_page_key("https://example.org/a?utm_source=x&page=1&ref=hn") == same_page_key(
+        "https://example.org/a/?page=1")
 
 
 def test_parse_duckduckgo():

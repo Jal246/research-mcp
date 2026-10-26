@@ -1,5 +1,7 @@
 """Tests that talk to the server through a real MCP client, the same way Claude does."""
 
+import json
+
 import pytest
 from mcp import Client
 
@@ -30,7 +32,8 @@ async def test_lists_all_tools():
         tools = await client.list_tools()
         assert {t.name for t in tools.tools} == {
             "fetch_page", "web_search", "search_papers", "save_to_library", "search_library",
-            "list_library", "remove_from_library", "find_similar", "crawl_site",
+            "list_library", "remove_from_library", "find_similar", "crawl_site", "extract_data",
+            "research_report",
         }
 
 
@@ -306,7 +309,8 @@ async def test_find_similar_same_site_and_library():
     await call("save_to_library", {"url": "https://blog.example/old-rsa"})  # The page itself.
     await call("save_to_library", {"url": "https://papers.example/paper.pdf"})
     text = text_of(await call("find_similar", {"url": "https://blog.example/rsa", "include_same_site": True}))
-    assert "**How RSA Works & Why** (similarity" in text
+    assert "RSA cryptosystem - Wikipedia** (similarity" in text
+    assert "How RSA Works & Why" not in text  # blog.example/rsa?ref=ddg is the page itself.
     assert "## Similar pages in your library" not in text  # Only the page itself is about RSA.
 
 
@@ -354,5 +358,77 @@ async def test_crawl_site_and_save():
 )
 async def test_crawl_site_errors(args, message):
     result = await call("crawl_site", args)
+    assert result.is_error
+    assert message in text_of(result)
+
+
+# --- Structured data ----------------------------------------------------------------------------
+
+async def test_extract_data():
+    result = await call("extract_data", {"url": "blog.example/product"})
+    assert not result.is_error
+    data = json.loads(text_of(result))
+    assert list(data) == ["url", "metadata", "json_ld", "tables", "headings"]
+    assert data["url"] == "https://blog.example/product"
+    assert data["json_ld"][0]["offers"]["price"] == "49.99"
+    assert data["tables"][0]["rows"][0] == ["Capacity", "1.7", "litres"]
+
+
+async def test_extract_data_kinds_and_limits():
+    args = {"url": "https://blog.example/product", "kinds": ["code", "headings"], "max_items": 1}
+    data = json.loads(text_of(await call("extract_data", args)))
+    assert data == {"url": "https://blog.example/product",
+                    "headings": [{"level": 1, "text": "Example Kettle 2"}],
+                    "code": [{"language": "python", "code": "import kettle\nkettle.boil(degrees=92)"}],
+                    "more": {"headings": 3, "code": 1}}
+
+
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        ({"url": "https://papers.example/paper.pdf"}, "is application/pdf, not a web page"),
+        ({"url": "https://blog.example/missing"}, "HTTP 404"),
+        ({"url": "https://blog.example/product", "max_items": 0}, "max_items must be between 1 and 500"),
+        ({"url": "https://blog.example/product", "kinds": ["prices"]}, "validation error"),
+    ],
+)
+async def test_extract_data_errors(args, message):
+    result = await call("extract_data", args)
+    assert result.is_error
+    assert message in text_of(result)
+
+
+# --- Research reports ---------------------------------------------------------------------------
+
+async def test_research_report():
+    text = text_of(await call("research_report", {"question": "rsa primes", "max_sources": 3}))
+    assert text.startswith("# Research brief: rsa primes\n\nSearched DuckDuckGo, Wikipedia, arXiv, "
+                           "Semantic Scholar and the library; ")
+    assert "\n\n## [1] " in text and "\n> " in text and "start_index=" in text
+    assert "## [4]" not in text
+
+
+async def test_research_report_with_library_and_save():
+    await call("save_to_library", {"url": "https://blog.example/rsa", "note": "the basics"})
+    text = text_of(await call("research_report", {"question": "how rsa works", "include_papers": False,
+                                                  "save": True, "tags": ["rsa"]}))
+    assert "from your library · note: the basics" in text
+    assert "Searched DuckDuckGo, Wikipedia and the library" in text
+    assert "with tags rsa." in text
+    # The sources read were saved; the page already in the library wasn't read again.
+    listed = text_of(await call("list_library", {"tag": "rsa"}))
+    assert "in the library tagged 'rsa'" in listed and "How RSA Works" not in listed
+
+
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        ({"question": " "}, "query must not be empty"),
+        ({"question": "rsa", "max_sources": 13}, "max_sources must be between 1 and 12"),
+        ({"question": "nothing"}, 'Found nothing to read for "nothing".'),
+    ],
+)
+async def test_research_report_errors(args, message):
+    result = await call("research_report", args)
     assert result.is_error
     assert message in text_of(result)

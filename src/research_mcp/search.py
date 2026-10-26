@@ -209,11 +209,18 @@ async def run_sources[T](
     return results, errors
 
 
+# Query parameters that only say where a visitor came from; the page is the same without them.
+TRACKING_PARAMS = {"ref", "ref_src", "source", "fbclid", "gclid", "msclkid", "mc_cid", "mc_eid"}
+
+
 def same_page_key(url: str) -> str:
-    """A URL with the unimportant differences removed, to spot the same page from two sources."""
+    """A URL with the unimportant differences removed (http/https, www., a trailing slash,
+    tracking parameters like utm_source), to spot the same page from two sources."""
     parts = urlsplit(url)
     host = (parts.hostname or "").removeprefix("www.")
-    return urlunsplit(("https", host, parts.path.rstrip("/"), parts.query, ""))
+    query = "&".join(pair for pair in parts.query.split("&") if pair and not (
+        (name := pair.split("=", 1)[0].lower()).startswith("utm_") or name in TRACKING_PARAMS))
+    return urlunsplit(("https", host, parts.path.rstrip("/"), query, ""))
 
 
 async def web_search(
