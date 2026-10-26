@@ -1,11 +1,17 @@
-"""A fake internet for the tests, so they never touch the real network."""
+"""A fake internet (and a fake embedding model) for the tests, so they never touch the real
+network or download anything."""
 
+import re
+import zlib
 from pathlib import Path
 
 import httpx
+import numpy as np
 import pytest
 
-from research_mcp import fetch, polite
+from research_mcp import fetch, polite, server
+from research_mcp.embed import unit
+from research_mcp.similar import STOP_WORDS
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -13,6 +19,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 FAKE_DNS = {
     "blog.example": ["93.184.215.14"],
     "papers.example": ["93.184.215.15"],
+    "docs.example": ["93.184.215.16"],
     "intranet.example": ["10.0.0.5"],
     # The real search APIs, answered by fake_api.
     "html.duckduckgo.com": ["52.142.124.215"],
@@ -69,10 +76,44 @@ def fake_api(request: httpx.Request, earlier: list[str]) -> httpx.Response:
                           content=(FIXTURES / name).read_bytes())
 
 
+def docs_page(title: str, text: str, links: list[str]) -> httpx.Response:
+    """A page of the fake docs site: a menu of links, then an article."""
+    menu = "".join(f'<li><a href="{link}">{link}</a></li>' for link in links)
+    paragraphs = "".join(f"<p>{sentence}.</p>" for sentence in text.split(". "))
+    return httpx.Response(200, headers={"content-type": "text/html"}, text=(
+        f"<html><head><title>{title} | Example Docs</title></head><body><nav><ul>{menu}</ul></nav>"
+        f"<article><h1>{title}</h1>{paragraphs}</article></body></html>"
+    ))
+
+
+# A small docs site under docs.example/docs/, for crawling. Its robots.txt keeps bots out of
+# /docs/private/. Links point at the same pages in different ways, outside the docs, at files
+# and at a page that doesn't exist.
+DOCS_SITE = {
+    "/robots.txt": "User-agent: *\nDisallow: /docs/private/\n",
+    "/docs/": ("Example Docs", "Welcome to the documentation of Example, a tool for brewing "
+               "coffee with code. Start with the introduction, then install it",
+               ["intro", "/docs/install#steps", "https://docs.example/docs/intro", "private/keys",
+                "/about", "https://other.example/docs/", "logo.png", "mailto:help@docs.example"]),
+    "/docs/intro": ("Introduction", "Example brews coffee by heating water to exactly ninety "
+                    "two degrees. The grinder settings are covered in the advanced guide",
+                    ["advanced", "/docs/"]),
+    "/docs/install": ("Installation", "Install Example with pip. It needs Python and a kettle "
+                      "connected over Bluetooth", ["missing"]),
+    "/docs/advanced": ("Advanced brewing", "Grind size changes extraction: finer grinds extract "
+                       "faster. Bloom the coffee for thirty seconds before pouring", ["deeper"]),
+    "/docs/deeper": ("Deeper", "This page is three clicks from the start", []),
+}
+
+
 def fake_site(request: httpx.Request, earlier: list[str]) -> httpx.Response:
     """Answer a request the way a few made-up websites would (earlier: the URLs asked for so far)."""
     if request.url.host in API_ANSWERS:
         return fake_api(request, earlier)
+    if request.url.host == "docs.example" and (page := DOCS_SITE.get(request.url.path)):
+        if isinstance(page, str):
+            return httpx.Response(200, headers={"content-type": "text/plain"}, text=page)
+        return docs_page(*page)
     url = str(request.url)
     match url:
         case "https://blog.example/rsa":
@@ -123,6 +164,43 @@ def fake_internet(monkeypatch):
     monkeypatch.setattr(fetch, "TRANSPORT", httpx.MockTransport(handler))
     monkeypatch.setattr(fetch, "resolve", resolve)
     return requests
+
+
+class FakeEmbedder:
+    """Stands in for the embedding model. A text's vector counts its words (each word goes to
+    one of 512 slots), so texts score high when they share words. Crude, but predictable, and
+    good enough to check the ranking around it works.
+    """
+
+    name = "fake"
+    min_score = 0.15
+    min_similar_score = 0.15
+    dimensions = 512
+
+    def __init__(self):
+        self.embedded: list[str] = []  # Every passage embedded, to check what gets (re-)embedded.
+
+    def _vector(self, text: str) -> np.ndarray:
+        vector = np.zeros(self.dimensions, dtype=np.float32)
+        for word in re.findall(r"[a-z]+", text.lower()):
+            if len(word) > 2 and word not in STOP_WORDS:
+                vector[zlib.crc32(word.encode()) % self.dimensions] += 1
+        return unit(vector)
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        self.embedded += texts
+        return np.array([self._vector(t) for t in texts]).reshape(len(texts), self.dimensions)
+
+    def embed_query(self, query: str) -> np.ndarray:
+        return self._vector(query)
+
+
+@pytest.fixture(autouse=True)
+def embedder(monkeypatch):
+    """Use FakeEmbedder everywhere, so no test downloads the real model."""
+    fake = FakeEmbedder()
+    monkeypatch.setattr(server, "_embedder", lambda: fake)
+    return fake
 
 
 @pytest.fixture

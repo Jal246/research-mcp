@@ -14,3 +14,6 @@ wheels/
 
 # Fetched pages (rebuilt automatically)
 .cache/
+
+# The research library (your own saved pages: back it up, don't commit it)
+data/
