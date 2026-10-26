@@ -1,0 +1,4 @@
+# Keep line endings as LF everywhere, and never touch binary files (a PDF changed by
+# line-ending conversion is a broken PDF).
+* text=auto eol=lf
+*.pdf binary
