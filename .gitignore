@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Extra working copies Claude Code creates for background jobs
+.claude/worktrees/
+
+# Fetched pages (rebuilt automatically)
+.cache/

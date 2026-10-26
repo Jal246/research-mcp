@@ -1,0 +1,7 @@
+{"total_count": 2, "incomplete_results": false, "items": [
+  {"full_name": "modelcontextprotocol/python-sdk", "html_url": "https://github.com/modelcontextprotocol/python-sdk",
+   "description": "The official Python SDK for Model Context Protocol servers and clients",
+   "stargazers_count": 24666, "language": "Python", "archived": false, "pushed_at": "2026-10-25T10:00:00Z"},
+  {"full_name": "someone/old-mcp", "html_url": "https://github.com/someone/old-mcp",
+   "description": null, "stargazers_count": 3, "language": null, "archived": true, "pushed_at": "2024-01-02T00:00:00Z"}
+]}

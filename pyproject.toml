@@ -1,0 +1,29 @@
+[project]
+name = "research-mcp"
+version = "0.1.0"
+description = "MCP server that lets Claude search and read the web: clean pages, papers, and a personal research library"
+readme = "README.md"
+authors = [
+    { name = "Jal246", email = "181914226+Jal246@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "lxml>=6.1.3",
+    "mcp[cli]>=2.3.0",
+    "pypdfium2>=5.14.0",
+    "trafilatura>=2.3.1",
+]
+
+[project.scripts]
+research-mcp = "research_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "anyio>=4.15.1",
+    "pytest>=9.1.1",
+]

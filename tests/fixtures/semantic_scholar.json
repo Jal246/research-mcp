@@ -1,0 +1,15 @@
+{"total": 2, "offset": 0, "data": [
+  {"paperId": "204e3073870fae3d05bcbc2f6a8e263d9b72e776",
+   "url": "https://www.semanticscholar.org/paper/204e3073870fae3d05bcbc2f6a8e263d9b72e776",
+   "title": "Attention is All you Need", "abstract": null, "venue": "Neural Information Processing Systems",
+   "year": 2017, "citationCount": 150123,
+   "externalIds": {"ArXiv": "1706.03762", "DBLP": "conf/nips/VaswaniSPUJGKP17"},
+   "openAccessPdf": {"url": "", "status": null},
+   "authors": [{"authorId": "1", "name": "Ashish Vaswani"}, {"authorId": "2", "name": "Noam Shazeer"}]},
+  {"paperId": "abc", "url": "https://www.semanticscholar.org/paper/abc",
+   "title": "Attention Mechanisms in Medicine", "abstract": "A review of attention in medical imaging.",
+   "venue": "", "year": 2021, "citationCount": 42,
+   "externalIds": {"DOI": "10.5555/Medicine.2021"},
+   "openAccessPdf": {"url": "https://papers.example/medicine.pdf", "status": "GOLD"},
+   "authors": [{"authorId": "3", "name": "Grace Example"}]}
+]}

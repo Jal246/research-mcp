@@ -1,0 +1,7 @@
+{"batchcomplete": true, "query": {"searchinfo": {"totalhits": 2}, "search": [
+  {"ns": 0, "title": "RSA cryptosystem", "pageid": 25385,
+   "snippet": "The <span class=\"searchmatch\">RSA</span> (Rivest&ndash;Shamir&ndash;Adleman) cryptosystem",
+   "timestamp": "2026-10-16T11:18:02Z"},
+  {"ns": 0, "title": "Euler's totient function", "pageid": 9612,
+   "snippet": "counts the positive integers up to a given integer", "timestamp": "2026-09-01T08:00:00Z"}
+]}}
